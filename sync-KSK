@@ -68,7 +68,7 @@ def sync_keys(master,slave,configfile,ods_path,ods_pid_path,dry_run):
     for domain, lckaid in delkeys.items():
         for ckaid in lckaid:
             # Delete key : force it but keep the key in HSM
-            del_key(ods_path,configfile,domain,dry_run,force=True,keep-key=True,ckaid=ckaid)
+            del_key(ods_path,configfile,domain,dry_run,force=True,keep_key=True,ckaid=ckaid)
     # Rollover ZSK type
     for domain  in delkeys.keys():
         rollover_key(ods_path,configfile,domain,dry_run,keytype="ZSK")
