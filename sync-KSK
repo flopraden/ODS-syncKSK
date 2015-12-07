@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+# -*- encoding: utf-8 -*-
+
+import argparse
+import logging
+from ods.api import export_keystate, add_key, del_key, reload_ods_enforcer, rollover_key
+
+
+import pprint
+pp = pprint.PrettyPrinter(indent=4)
+
+###### Arg Parser
+parser = argparse.ArgumentParser(description='OpenDNSSEC managment utility to add/delete DS from OVH.')
+
+
+##### App Args
+parser.add_argument('--ods-ksmutil-path', default='ods-ksmutil', help='path of ods-ksmutil')
+parser.add_argument('--ods-master-config', help='config file for OpenDNSSEC')
+parser.add_argument('--ods-slave-ksmutil-path', nargs='*',default=[], help='path of ods-ksmutil for slaves')
+parser.add_argument('--ods-slave-config', nargs='+', type=str, default=[],help='config file for OpenDNSSEC')
+parser.add_argument('--ods-slave-pid', nargs='+', type=str, default=[],help='pid file for OpenDNSSEC')
+parser.add_argument('--domain-name', '-d', nargs='*', default=[],help='Domain name to treat : default => list of all ready DS')
+parser.add_argument('--dry-run', '-n',  action='store_true', default=False, help='Domain name to treat : default => list of all ready DS')
+####### sync DS
+parser.add_argument('--parse-stdin', '-i', action='store_true', default=False, help='parse stdin to get value of key to update')
+
+args = parser.parse_args()
+dargs=vars(args)
+
+# create logger
+logger = logging.getLogger('SYNC-KEY')
+logger.setLevel(logging.DEBUG)
+
+# create console handler and set level to debug
+ch = logging.StreamHandler()
+ch.setLevel(logging.DEBUG)
+
+# create formatter
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# add formatter to ch
+ch.setFormatter(formatter)
+
+# add ch to logger
+logger.addHandler(ch)
+
+
+
+
+def sync_keys(master,slave,configfile,ods_path,ods_pid_path,dry_run):
+    addkeys={ domain: { tag: taginfo for tag,taginfo in tags.items() if tag not in slave.get(domain,{}) and taginfo['state'] in ['generated','published','ready','active'] and taginfo['type'] == 'ksk' } for domain,tags in master.items() }
+    delkeys={ 
+        domain: [ 
+            taginfo['ckaid'] for tag,taginfo in tags.items() if tag not in master.get(domain,{}) and tag != 'missing' and taginfo['state'] not in ['retired', 'revoked',' dead'] and taginfo['type'] == 'ksk' 
+            ] +
+        [ 
+            taginfo['ckaid'] for taginfo in tags.get('missing',[])
+            ]
+        for domain,tags in slave.items() 
+        }
+    logger.debug("Add keys from master : %s",pp.pformat(addkeys))
+    logger.debug("Del keys from slave : %s",pp.pformat(delkeys))
+    for domain, infos in addkeys.items():
+        for tag, taginfo in infos.items():
+            add_key(ods_path,configfile,domain, taginfo,dry_run)
+    # reload enforcer because error in ods-ksmutil with multiple enforcer
+    logger.debug("reload enforcer with pid file : %s", ods_pid_path)
+    reload_ods_enforcer(ods_pid_path)
+    for domain, lckaid in delkeys.items():
+        for ckaid in lckaid:
+            # Delete key : force it but keep the key in HSM
+            del_key(ods_path,configfile,domain,dry_run,force=True,keep-key=True,ckaid=ckaid)
+    # Rollover ZSK type
+    for domain  in delkeys.keys():
+        rollover_key(ods_path,configfile,domain,dry_run,keytype="ZSK")
+    reload_ods_enforcer(ods_pid_path)
+
+
+        
+
+
+# domain we want to modify
+domains=dargs['domain_name']
+# For now, juste use stdin ODS to get domain name for triggering DS update
+if dargs['parse_stdin']:
+    reg=re.compile('^([^ ]+?)\.?(?: |\t)*[0-9]+(?: |\t)*IN(?: |\t)*DNSKEY(?: |\t)*([0-9]+)(?: |\t)*([0-9]+)(?: |\t)*([0-9]+)(?: |\t)*([^ ]+)(?: |\t)*?.*$',re.M)
+    stdin_keyupdate=reg.findall("".join(sys.stdin))
+    stdin_domain=[domain for (domain,flags,protocol,algorithm,pubKey) in stdin_keyupdate if domain not in domains]
+    domains.extend(stdin_domain)
+
+configfile=dargs.get("ods_master_config",None)
+logger.debug("READ Master Config for ODS")
+keys_master=export_keystate(configfile,**dargs)
+logger.debug("Master Config for ODS : %s",pp.pformat(keys_master))
+
+if len(dargs["ods_slave_ksmutil_path"]) == 0:
+    dargs["ods_slave_ksmutil_path"]=[dargs["ods_ksmutil_path"]]*len(dargs["ods_slave_config"])
+if len(dargs["ods_slave_ksmutil_path"]) != len(dargs["ods_slave_config"]) or len(dargs["ods_slave_pid"]) != len(dargs["ods_slave_config"]):
+    logger.critical("ods-slave-ksmutil-path / ods-slave-config / ods-slave-pid must have equal argument")
+    exit(1)
+
+for ods,configfile,pid_file in zip(dargs["ods_slave_ksmutil_path"],dargs["ods_slave_config"],dargs["ods_slave_pid"]):
+    logger.debug("READ Config for ODS : %s",configfile)
+    keys=export_keystate(configfile,**dargs)
+    logger.debug("Config for ODS : %s",pp.pformat(keys))
+    sync_keys(keys_master,keys,configfile,ods,pid_file,dargs["dry_run"])
+
+
+

@@ -1,0 +1,3 @@
+[submodule "lib/ods-api"]
+	path = lib/ods-api
+	url = GitHub:flopraden/ods-api.git
